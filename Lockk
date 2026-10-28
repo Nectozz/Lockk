@@ -1,0 +1,1409 @@
+-- ========================================================================
+-- Universal AimLock v10 + WHITELIST (H) + раздельная подсветка
+-- Есть таргеты → лок только по ним. Нет таргетов → лок по всем, кроме WL.
+-- ========================================================================
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+-- ========== НАСТРОЙКИ ==========
+local Settings = {
+    AimLockKey = Enum.KeyCode.Q,
+    MenuKey = Enum.KeyCode.X,
+    MultiSelectKey = Enum.KeyCode.C,
+    WhitelistKey = Enum.KeyCode.H,
+    AimSensitivity = 1,
+    DotSize = 3,
+    DotMinSize = 0,
+    DotMaxSize = 9,
+
+    TargetOutlineColor = {255, 40, 40},
+    TargetFillColor = {255, 40, 40},
+    TargetOutlineTransparency = 0.4,
+    TargetFillTransparency = 0.75,
+    TargetUseOutline = true,
+    TargetUseFill = true,
+
+    WhitelistOutlineColor = {40, 120, 255},
+    WhitelistFillColor = {40, 120, 255},
+    WhitelistOutlineTransparency = 0.4,
+    WhitelistFillTransparency = 0.75,
+    WhitelistUseOutline = true,
+    WhitelistUseFill = true,
+
+    HighlightColor = {255, 255, 255},
+    CurrentTargetColor = {255, 255, 255},
+
+    FieldOfView = 120
+}
+
+-- ========== СОСТОЯНИЕ ==========
+local aimLockEnabled = false
+local menuVisible = false
+local customMenuVisible = false
+local selectedPlayers = {}
+local whitelistPlayers = {}
+local currentTarget = nil
+local isMultiSelectPressed = false
+local aimDots = {}
+local hoveredListPlayer = nil
+local HIGHLIGHT_NAME = "AimLockHighlight"
+
+-- ========== УТИЛИТЫ ==========
+local function rgbToColor3(rgb)
+    return Color3.new(rgb[1]/255, rgb[2]/255, rgb[3]/255)
+end
+
+local function parseRGBString(str)
+    local r, g, b = str:match("(%d+);(%d+);(%d+)")
+    if r and g and b then
+        return {
+            math.clamp(tonumber(r) or 0, 0, 255),
+            math.clamp(tonumber(g) or 0, 0, 255),
+            math.clamp(tonumber(b) or 0, 0, 255)
+        }
+    end
+    return {255, 255, 255}
+end
+
+local function formatRGBString(rgb)
+    return string.format("%d;%d;%d", rgb[1], rgb[2], rgb[3])
+end
+
+local function isPendingPlayer(entry)
+    return type(entry) == "table" and entry.Pending == true
+end
+
+local function isPlayerAlive(player)
+    if not player or not player.Character then return false end
+    local hum = player.Character:FindFirstChildOfClass("Humanoid")
+    return hum and hum.Health > 0
+end
+
+local function getTargetPart(character)
+    if not character then return nil end
+    return character:FindFirstChild("HumanoidRootPart")
+        or character:FindFirstChild("Head")
+        or character:FindFirstChild("Torso")
+        or character:FindFirstChild("UpperTorso")
+end
+
+local function isInList(list, player)
+    for _, p in pairs(list) do
+        if p == player then return true end
+    end
+    return false
+end
+
+local function removeFromList(list, player)
+    for i, p in pairs(list) do
+        if p == player then
+            table.remove(list, i)
+            return true
+        end
+    end
+    return false
+end
+
+local function getPlayerUnderCursor()
+    local mouse = LocalPlayer:GetMouse()
+    local target = mouse.Target
+    if not target then return nil end
+    local current = target
+    while current do
+        if current:IsA("Model") and current:FindFirstChildOfClass("Humanoid") then
+            local player = Players:GetPlayerFromCharacter(current)
+            if player and player ~= LocalPlayer then
+                return player
+            end
+        end
+        current = current.Parent
+    end
+    return nil
+end
+
+-- ========== ФАЙЛЫ ==========
+local function hasFileSupport()
+    return type(writefile) == "function" and type(readfile) == "function"
+end
+
+local function saveSettings()
+    if not hasFileSupport() then return end
+    local data = {
+        DotSize = Settings.DotSize,
+        TargetOutlineColor = Settings.TargetOutlineColor,
+        TargetFillColor = Settings.TargetFillColor,
+        TargetOutlineTransparency = Settings.TargetOutlineTransparency,
+        TargetFillTransparency = Settings.TargetFillTransparency,
+        TargetUseOutline = Settings.TargetUseOutline,
+        TargetUseFill = Settings.TargetUseFill,
+        WhitelistOutlineColor = Settings.WhitelistOutlineColor,
+        WhitelistFillColor = Settings.WhitelistFillColor,
+        WhitelistOutlineTransparency = Settings.WhitelistOutlineTransparency,
+        WhitelistFillTransparency = Settings.WhitelistFillTransparency,
+        WhitelistUseOutline = Settings.WhitelistUseOutline,
+        WhitelistUseFill = Settings.WhitelistUseFill,
+        HighlightColor = Settings.HighlightColor,
+        CurrentTargetColor = Settings.CurrentTargetColor
+    }
+    pcall(function()
+        writefile("AimLock_Settings_v3.txt", HttpService:JSONEncode(data))
+    end)
+end
+
+local function loadSettings()
+    if not hasFileSupport() then return end
+    local success, data = pcall(function()
+        return HttpService:JSONDecode(readfile("AimLock_Settings_v3.txt"))
+    end)
+    if success and type(data) == "table" then
+        if data.DotSize then Settings.DotSize = math.clamp(data.DotSize, Settings.DotMinSize, Settings.DotMaxSize) end
+        for _, key in ipairs({
+            "TargetOutlineColor","TargetFillColor","WhitelistOutlineColor","WhitelistFillColor",
+            "HighlightColor","CurrentTargetColor"
+        }) do
+            if data[key] then Settings[key] = data[key] end
+        end
+        for _, key in ipairs({
+            "TargetOutlineTransparency","TargetFillTransparency",
+            "WhitelistOutlineTransparency","WhitelistFillTransparency"
+        }) do
+            if data[key] then Settings[key] = data[key] end
+        end
+        for _, key in ipairs({
+            "TargetUseOutline","TargetUseFill","WhitelistUseOutline","WhitelistUseFill"
+        }) do
+            if data[key] ~= nil then Settings[key] = data[key] end
+        end
+    end
+end
+
+local function serializeList(list)
+    local data = {}
+    for _, entry in pairs(list) do
+        if type(entry) == "table" and entry.Pending then
+            table.insert(data, entry)
+        elseif type(entry) == "userdata" then
+            table.insert(data, { Name = entry.Name, UserId = entry.UserId, Pending = false })
+        end
+    end
+    return data
+end
+
+local function deserializeList(data)
+    local list = {}
+    if type(data) ~= "table" then return list end
+    for _, saved in pairs(data) do
+        if saved.Pending then
+            table.insert(list, saved)
+        else
+            local player = Players:FindFirstChild(saved.Name)
+            if player then
+                table.insert(list, player)
+            else
+                table.insert(list, { Name = saved.Name, UserId = saved.UserId, Pending = true })
+            end
+        end
+    end
+    return list
+end
+
+local function saveSelectedPlayers()
+    if not hasFileSupport() then return end
+    pcall(function()
+        writefile("AimLock_Selected.txt", HttpService:JSONEncode(serializeList(selectedPlayers)))
+    end)
+end
+
+local function loadSelectedPlayers()
+    if not hasFileSupport() then return end
+    local success, data = pcall(function()
+        return HttpService:JSONDecode(readfile("AimLock_Selected.txt"))
+    end)
+    if success then
+        selectedPlayers = deserializeList(data)
+    end
+end
+
+local function saveWhitelist()
+    if not hasFileSupport() then return end
+    pcall(function()
+        writefile("AimLock_Whitelist.txt", HttpService:JSONEncode(serializeList(whitelistPlayers)))
+    end)
+end
+
+local function loadWhitelist()
+    if not hasFileSupport() then return end
+    local success, data = pcall(function()
+        return HttpService:JSONDecode(readfile("AimLock_Whitelist.txt"))
+    end)
+    if success then
+        whitelistPlayers = deserializeList(data)
+    end
+end
+
+local function resolvePendingList(list)
+    for i, entry in pairs(list) do
+        if isPendingPlayer(entry) then
+            for _, player in pairs(Players:GetPlayers()) do
+                if player.UserId == entry.UserId then
+                    list[i] = player
+                    break
+                end
+            end
+        end
+    end
+end
+
+-- ========== HIGHLIGHT ==========
+local function ensureCharacterReady(player)
+    if not player then return nil end
+    local char = player.Character
+    if not char then return nil end
+    if not char:FindFirstChildOfClass("Humanoid") then
+        local ok = pcall(function() char:WaitForChild("Humanoid", 2) end)
+        if not ok then return nil end
+    end
+    return char
+end
+
+local function applyHighlight(player, isTarget)
+    local char = ensureCharacterReady(player)
+    if not char then return end
+
+    local highlight = char:FindFirstChild(HIGHLIGHT_NAME)
+    if not highlight or not highlight:IsA("Highlight") then
+        if highlight then highlight:Destroy() end
+        highlight = Instance.new("Highlight")
+        highlight.Name = HIGHLIGHT_NAME
+        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        highlight.Adornee = char
+        highlight.Parent = char
+    end
+
+    highlight.Adornee = char
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+
+    if isTarget then
+        highlight.OutlineColor = rgbToColor3(Settings.TargetOutlineColor)
+        highlight.FillColor = rgbToColor3(Settings.TargetFillColor)
+        highlight.OutlineTransparency = Settings.TargetUseOutline and Settings.TargetOutlineTransparency or 1
+        highlight.FillTransparency = Settings.TargetUseFill and Settings.TargetFillTransparency or 1
+        highlight.Enabled = Settings.TargetUseOutline or Settings.TargetUseFill
+    else
+        highlight.OutlineColor = rgbToColor3(Settings.WhitelistOutlineColor)
+        highlight.FillColor = rgbToColor3(Settings.WhitelistFillColor)
+        highlight.OutlineTransparency = Settings.WhitelistUseOutline and Settings.WhitelistOutlineTransparency or 1
+        highlight.FillTransparency = Settings.WhitelistUseFill and Settings.WhitelistFillTransparency or 1
+        highlight.Enabled = Settings.WhitelistUseOutline or Settings.WhitelistUseFill
+    end
+end
+
+local function updateAllHighlights()
+    for _, p in pairs(selectedPlayers) do
+        if not isPendingPlayer(p) then applyHighlight(p, true) end
+    end
+    for _, p in pairs(whitelistPlayers) do
+        if not isPendingPlayer(p) then applyHighlight(p, false) end
+    end
+end
+
+local function removePlayerHighlight(player)
+    if player and player.Character then
+        local h = player.Character:FindFirstChild(HIGHLIGHT_NAME)
+        if h then h:Destroy() end
+    end
+end
+
+-- ========== DRAWING ==========
+local hasDrawing = (type(Drawing) == "table" and type(Drawing.new) == "function")
+
+local function createAimDot(player)
+    if not hasDrawing then return nil end
+    if aimDots[player] then return aimDots[player] end
+    local dot = Drawing.new("Square")
+    dot.Visible = false
+    dot.Size = Vector2.new(Settings.DotSize, Settings.DotSize)
+    dot.Color = rgbToColor3(Settings.HighlightColor)
+    dot.Filled = true
+    dot.Transparency = 1
+    dot.ZIndex = 999
+    aimDots[player] = dot
+    return dot
+end
+
+local function removeAimDot(player)
+    if aimDots[player] then
+        pcall(function() aimDots[player]:Remove() end)
+        aimDots[player] = nil
+    end
+end
+
+local function updateAimDot(player)
+    if not hasDrawing then return end
+    if not player or not player.Character then return end
+    local dot = aimDots[player]
+    if not dot then return end
+    local part = getTargetPart(player.Character)
+    if not part then
+        dot.Visible = false
+        return
+    end
+    local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+    if onScreen then
+        local offset = math.floor(Settings.DotSize / 2)
+        dot.Position = Vector2.new(screenPos.X - offset, screenPos.Y - offset)
+        dot.Visible = true
+        dot.Color = (player == currentTarget and aimLockEnabled)
+            and rgbToColor3(Settings.CurrentTargetColor)
+            or rgbToColor3(Settings.HighlightColor)
+    else
+        dot.Visible = false
+    end
+end
+
+local function updateAllDotSizes()
+    local size = Settings.DotSize
+    for _, dot in pairs(aimDots) do
+        dot.Size = Vector2.new(size, size)
+    end
+end
+
+local function updateAllDotColors()
+    for player, dot in pairs(aimDots) do
+        dot.Color = (player == currentTarget and aimLockEnabled)
+            and rgbToColor3(Settings.CurrentTargetColor)
+            or rgbToColor3(Settings.HighlightColor)
+    end
+end
+
+-- ========== AIM ==========
+local function isWhitelisted(player)
+    return isInList(whitelistPlayers, player)
+end
+
+local function hasAnyTargets()
+    for _, entry in pairs(selectedPlayers) do
+        if not isPendingPlayer(entry) then return true end
+    end
+    return false
+end
+
+-- Есть таргеты → первый живой таргет (не WL).
+-- Нет таргетов → ближайший среди всех игроков, кроме WL.
+local function getAimTarget()
+    if hasAnyTargets() then
+        for _, entry in pairs(selectedPlayers) do
+            if not isPendingPlayer(entry)
+                and entry ~= LocalPlayer
+                and isPlayerAlive(entry)
+                and not isWhitelisted(entry)
+                and getTargetPart(entry.Character) then
+                return entry
+            end
+        end
+        return nil
+    end
+
+    -- фолбэк: все игроки, кроме WL
+    local localChar = LocalPlayer.Character
+    local localHRP = localChar and getTargetPart(localChar)
+    if not localHRP then return nil end
+
+    local localPos = localHRP.Position
+    local bestDist = math.huge
+    local bestPlayer = nil
+
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and isPlayerAlive(p) and not isWhitelisted(p) then
+            local part = getTargetPart(p.Character)
+            if part then
+                local dist = (localPos - part.Position).Magnitude
+                if dist < bestDist then
+                    bestDist = dist
+                    bestPlayer = p
+                end
+            end
+        end
+    end
+    return bestPlayer
+end
+
+-- ========== GUI ==========
+local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+local oldGui = playerGui:FindFirstChild("AimLockMenu")
+if oldGui then oldGui:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "AimLockMenu"
+gui.ResetOnSpawn = false
+gui.Parent = playerGui
+
+local function getAvatarUrl(userId)
+    return "https://www.roblox.com/headshot-thumbnail/image?userId=" .. userId .. "&width=150&height=150&format=png"
+end
+
+local frame = Instance.new("Frame")
+frame.Name = "MainFrame"
+frame.Size = UDim2.new(0, 280, 0, 420)
+frame.Position = UDim2.new(1, -290, 0.5, -210)
+frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+frame.BackgroundTransparency = 0.1
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Visible = false
+frame.Parent = gui
+Instance.new("UICorner").CornerRadius = UDim.new(0, 8); Instance.new("UICorner").Parent = frame
+
+local titleFrame = Instance.new("Frame")
+titleFrame.Size = UDim2.new(1, -20, 0, 35)
+titleFrame.Position = UDim2.new(0, 10, 0, 0)
+titleFrame.BackgroundTransparency = 1
+titleFrame.Parent = frame
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -70, 1, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "AIM LOCK • МЕНЮ"
+titleLabel.TextColor3 = Color3.fromRGB(255,255,255)
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 16
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Parent = titleFrame
+
+local settingsBtn = Instance.new("TextButton")
+settingsBtn.Size = UDim2.new(0, 25, 0, 25)
+settingsBtn.Position = UDim2.new(1, -60, 0, 5)
+settingsBtn.BackgroundColor3 = Color3.fromRGB(50,50,50)
+settingsBtn.Text = "⚙"
+settingsBtn.TextColor3 = Color3.fromRGB(255,255,255)
+settingsBtn.TextSize = 16
+settingsBtn.Font = Enum.Font.GothamBold
+settingsBtn.Parent = titleFrame
+Instance.new("UICorner").CornerRadius = UDim.new(0, 6); Instance.new("UICorner").Parent = settingsBtn
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 25, 0, 25)
+closeBtn.Position = UDim2.new(1, -30, 0, 5)
+closeBtn.BackgroundColor3 = Color3.fromRGB(50,50,50)
+closeBtn.Text = "x"
+closeBtn.TextColor3 = Color3.fromRGB(255,100,100)
+closeBtn.TextSize = 16
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.Parent = titleFrame
+Instance.new("UICorner").CornerRadius = UDim.new(0, 6); Instance.new("UICorner").Parent = closeBtn
+
+closeBtn.MouseButton1Click:Connect(function()
+    menuVisible = false
+    frame.Visible = false
+end)
+
+local statusFrame = Instance.new("Frame")
+statusFrame.Size = UDim2.new(1, -20, 0, 30)
+statusFrame.Position = UDim2.new(0, 10, 0, 40)
+statusFrame.BackgroundColor3 = Color3.fromRGB(30,30,30)
+statusFrame.BackgroundTransparency = 0.3
+statusFrame.Parent = frame
+Instance.new("UICorner").CornerRadius = UDim.new(0, 4); Instance.new("UICorner").Parent = statusFrame
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(0.5, -5, 1, 0)
+statusLabel.Position = UDim2.new(0, 5, 0, 0)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "AIM:"
+statusLabel.TextColor3 = Color3.fromRGB(200,200,200)
+statusLabel.TextSize = 14
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Parent = statusFrame
+
+local statusValue = Instance.new("TextLabel")
+statusValue.Size = UDim2.new(0.5, -5, 1, 0)
+statusValue.Position = UDim2.new(0.5, 0, 0, 0)
+statusValue.BackgroundTransparency = 1
+statusValue.Text = "OFF"
+statusValue.TextColor3 = Color3.fromRGB(255,255,255)
+statusValue.TextSize = 14
+statusValue.Font = Enum.Font.GothamBold
+statusValue.TextXAlignment = Enum.TextXAlignment.Right
+statusValue.Parent = statusFrame
+
+local targetFrame = Instance.new("Frame")
+targetFrame.Size = UDim2.new(1, -20, 0, 25)
+targetFrame.Position = UDim2.new(0, 10, 0, 75)
+targetFrame.BackgroundTransparency = 1
+targetFrame.Parent = frame
+
+local targetLabel = Instance.new("TextLabel")
+targetLabel.Size = UDim2.new(1, 0, 1, 0)
+targetLabel.BackgroundTransparency = 1
+targetLabel.Text = "Цель: None"
+targetLabel.TextColor3 = Color3.fromRGB(150,150,150)
+targetLabel.TextSize = 13
+targetLabel.Font = Enum.Font.Gotham
+targetLabel.TextXAlignment = Enum.TextXAlignment.Left
+targetLabel.Parent = targetFrame
+
+local selectedFrame = Instance.new("Frame")
+selectedFrame.Size = UDim2.new(1, -20, 0, 25)
+selectedFrame.Position = UDim2.new(0, 10, 0, 100)
+selectedFrame.BackgroundTransparency = 1
+selectedFrame.Parent = frame
+
+local selectedLabel = Instance.new("TextLabel")
+selectedLabel.Size = UDim2.new(1, 0, 1, 0)
+selectedLabel.BackgroundTransparency = 1
+selectedLabel.Text = "Таргеты: 0 | WL: 0"
+selectedLabel.TextColor3 = Color3.fromRGB(150,150,150)
+selectedLabel.TextSize = 13
+selectedLabel.Font = Enum.Font.Gotham
+selectedLabel.TextXAlignment = Enum.TextXAlignment.Left
+selectedLabel.Parent = selectedFrame
+
+local dotSizeFrame = Instance.new("Frame")
+dotSizeFrame.Size = UDim2.new(1, -20, 0, 45)
+dotSizeFrame.Position = UDim2.new(0, 10, 0, 130)
+dotSizeFrame.BackgroundColor3 = Color3.fromRGB(30,30,30)
+dotSizeFrame.BackgroundTransparency = 0.3
+dotSizeFrame.Parent = frame
+Instance.new("UICorner").CornerRadius = UDim.new(0, 4); Instance.new("UICorner").Parent = dotSizeFrame
+
+local dotSizeLabel = Instance.new("TextLabel")
+dotSizeLabel.Size = UDim2.new(1, -10, 0, 20)
+dotSizeLabel.Position = UDim2.new(0, 5, 0, 2)
+dotSizeLabel.BackgroundTransparency = 1
+dotSizeLabel.Text = "Размер точки: " .. Settings.DotSize .. "x" .. Settings.DotSize
+dotSizeLabel.TextColor3 = Color3.fromRGB(200,200,200)
+dotSizeLabel.TextSize = 12
+dotSizeLabel.Font = Enum.Font.Gotham
+dotSizeLabel.TextXAlignment = Enum.TextXAlignment.Left
+dotSizeLabel.Parent = dotSizeFrame
+
+local sliderBg = Instance.new("Frame")
+sliderBg.Size = UDim2.new(1, -20, 0, 10)
+sliderBg.Position = UDim2.new(0, 10, 0, 25)
+sliderBg.BackgroundColor3 = Color3.fromRGB(50,50,50)
+sliderBg.BorderSizePixel = 0
+sliderBg.Parent = dotSizeFrame
+Instance.new("UICorner").CornerRadius = UDim.new(1, 0); Instance.new("UICorner").Parent = sliderBg
+
+local sliderFill = Instance.new("Frame")
+sliderFill.Size = UDim2.new(Settings.DotSize / Settings.DotMaxSize, 0, 1, 0)
+sliderFill.BackgroundColor3 = Color3.fromRGB(255,255,255)
+sliderFill.BorderSizePixel = 0
+sliderFill.Parent = sliderBg
+Instance.new("UICorner").CornerRadius = UDim.new(1, 0); Instance.new("UICorner").Parent = sliderFill
+
+local sliderButton = Instance.new("TextButton")
+sliderButton.Size = UDim2.new(0, 16, 0, 16)
+sliderButton.Position = UDim2.new(Settings.DotSize / Settings.DotMaxSize, -8, 0.5, -8)
+sliderButton.BackgroundColor3 = Color3.fromRGB(255,255,255)
+sliderButton.Text = ""
+sliderButton.Parent = sliderBg
+Instance.new("UICorner").CornerRadius = UDim.new(1, 0); Instance.new("UICorner").Parent = sliderButton
+
+local isDragging = false
+sliderButton.MouseButton1Down:Connect(function() isDragging = true end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then isDragging = false end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if isDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local mousePos = UserInputService:GetMouseLocation()
+        local pos = sliderBg.AbsolutePosition
+        local size = sliderBg.AbsoluteSize.X
+        local rel = math.clamp((mousePos.X - pos.X) / size, 0, 1)
+        local newSize = math.floor(rel * Settings.DotMaxSize + 0.5)
+        newSize = math.clamp(newSize, Settings.DotMinSize, Settings.DotMaxSize)
+        if newSize ~= Settings.DotSize then
+            Settings.DotSize = newSize
+            sliderFill.Size = UDim2.new(newSize / Settings.DotMaxSize, 0, 1, 0)
+            sliderButton.Position = UDim2.new(newSize / Settings.DotMaxSize, -8, 0.5, -8)
+            dotSizeLabel.Text = "Размер точки: " .. newSize .. "x" .. newSize
+            updateAllDotSizes()
+            saveSettings()
+        end
+    end
+end)
+
+local scrollingFrame = Instance.new("ScrollingFrame")
+scrollingFrame.Name = "PlayerList"
+scrollingFrame.Position = UDim2.new(0, 10, 0, 180)
+scrollingFrame.Size = UDim2.new(1, -20, 1, -190)
+scrollingFrame.BackgroundColor3 = Color3.fromRGB(25,25,25)
+scrollingFrame.BackgroundTransparency = 0.5
+scrollingFrame.ScrollBarThickness = 4
+scrollingFrame.BorderSizePixel = 0
+scrollingFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+scrollingFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scrollingFrame.Parent = frame
+Instance.new("UICorner").CornerRadius = UDim.new(0, 4); Instance.new("UICorner").Parent = scrollingFrame
+
+local gridLayout = Instance.new("UIGridLayout")
+gridLayout.CellSize = UDim2.new(0, 80, 0, 90)
+gridLayout.CellPadding = UDim2.new(0, 5, 0, 5)
+gridLayout.FillDirection = Enum.FillDirection.Horizontal
+gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+gridLayout.Parent = scrollingFrame
+
+local customFrame = Instance.new("Frame")
+customFrame.Name = "CustomMenu"
+customFrame.Size = UDim2.new(0, 300, 0, 500)
+customFrame.Position = UDim2.new(1, -620, 0.5, -250)
+customFrame.BackgroundColor3 = Color3.fromRGB(20,20,20)
+customFrame.BackgroundTransparency = 0.1
+customFrame.BorderSizePixel = 0
+customFrame.Active = true
+customFrame.Draggable = true
+customFrame.Visible = false
+customFrame.Parent = gui
+Instance.new("UICorner").CornerRadius = UDim.new(0, 8); Instance.new("UICorner").Parent = customFrame
+
+local customTitle = Instance.new("TextLabel")
+customTitle.Size = UDim2.new(1, -20, 0, 35)
+customTitle.Position = UDim2.new(0, 10, 0, 0)
+customTitle.BackgroundTransparency = 1
+customTitle.Text = "НАСТРОЙКИ ВИЗУАЛА"
+customTitle.TextColor3 = Color3.fromRGB(255,255,255)
+customTitle.Font = Enum.Font.GothamBold
+customTitle.TextSize = 16
+customTitle.TextXAlignment = Enum.TextXAlignment.Left
+customTitle.Parent = customFrame
+
+local customClose = Instance.new("TextButton")
+customClose.Size = UDim2.new(0, 25, 0, 25)
+customClose.Position = UDim2.new(1, -35, 0, 5)
+customClose.BackgroundColor3 = Color3.fromRGB(50,50,50)
+customClose.Text = "x"
+customClose.TextColor3 = Color3.fromRGB(255,100,100)
+customClose.TextSize = 16
+customClose.Font = Enum.Font.GothamBold
+customClose.Parent = customFrame
+Instance.new("UICorner").CornerRadius = UDim.new(0, 6); Instance.new("UICorner").Parent = customClose
+
+customClose.MouseButton1Click:Connect(function()
+    customMenuVisible = false
+    customFrame.Visible = false
+end)
+
+local customScrolling = Instance.new("ScrollingFrame")
+customScrolling.Size = UDim2.new(1, -20, 1, -50)
+customScrolling.Position = UDim2.new(0, 10, 0, 45)
+customScrolling.BackgroundTransparency = 1
+customScrolling.ScrollBarThickness = 4
+customScrolling.CanvasSize = UDim2.new(0, 0, 0, 0)
+customScrolling.AutomaticCanvasSize = Enum.AutomaticSize.Y
+customScrolling.Parent = customFrame
+
+local customLayout = Instance.new("UIListLayout")
+customLayout.Padding = UDim.new(0, 10)
+customLayout.SortOrder = Enum.SortOrder.LayoutOrder
+customLayout.Parent = customScrolling
+
+local function createSection(title)
+    local s = Instance.new("Frame")
+    s.Size = UDim2.new(1, 0, 0, 30)
+    s.BackgroundTransparency = 1
+    s.Parent = customScrolling
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, 0, 1, 0)
+    l.BackgroundTransparency = 1
+    l.Text = title
+    l.TextColor3 = Color3.fromRGB(200,200,200)
+    l.TextSize = 14
+    l.Font = Enum.Font.GothamBold
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = s
+    return s
+end
+
+local function createToggle(parent, text, settingRef, callback)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 30)
+    f.BackgroundColor3 = Color3.fromRGB(30,30,30)
+    f.BackgroundTransparency = 0.3
+    f.Parent = parent
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 4); Instance.new("UICorner").Parent = f
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -40, 1, 0)
+    lbl.Position = UDim2.new(0, 10, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = Color3.fromRGB(200,200,200)
+    lbl.TextSize = 12
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = f
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 20, 0, 20)
+    btn.Position = UDim2.new(1, -30, 0.5, -10)
+    btn.BackgroundColor3 = settingRef and Color3.fromRGB(0,255,0) or Color3.fromRGB(100,100,100)
+    btn.Text = ""
+    btn.Parent = f
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 4); Instance.new("UICorner").Parent = btn
+
+    btn.MouseButton1Click:Connect(function()
+        settingRef = not settingRef
+        btn.BackgroundColor3 = settingRef and Color3.fromRGB(0,255,0) or Color3.fromRGB(100,100,100)
+        if callback then callback(settingRef) end
+    end)
+    return f
+end
+
+local function createRGBInput(parent, text, colorSetting, callback)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 60)
+    f.BackgroundColor3 = Color3.fromRGB(30,30,30)
+    f.BackgroundTransparency = 0.3
+    f.Parent = parent
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 4); Instance.new("UICorner").Parent = f
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -20, 0, 20)
+    lbl.Position = UDim2.new(0, 10, 0, 5)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = Color3.fromRGB(200,200,200)
+    lbl.TextSize = 12
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = f
+
+    local preview = Instance.new("Frame")
+    preview.Size = UDim2.new(0, 20, 0, 20)
+    preview.Position = UDim2.new(1, -30, 0, 5)
+    preview.BackgroundColor3 = rgbToColor3(colorSetting)
+    preview.Parent = f
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 4); Instance.new("UICorner").Parent = preview
+
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(1, -40, 0, 25)
+    box.Position = UDim2.new(0, 10, 0, 30)
+    box.BackgroundColor3 = Color3.fromRGB(20,20,20)
+    box.TextColor3 = Color3.fromRGB(255,255,255)
+    box.PlaceholderColor3 = Color3.fromRGB(100,100,100)
+    box.PlaceholderText = "255;255;255"
+    box.Text = formatRGBString(colorSetting)
+    box.Font = Enum.Font.Gotham
+    box.TextSize = 12
+    box.Parent = f
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 4); Instance.new("UICorner").Parent = box
+
+    box.FocusLost:Connect(function()
+        local newColor = parseRGBString(box.Text)
+        for i=1,3 do colorSetting[i] = newColor[i] end
+        preview.BackgroundColor3 = rgbToColor3(colorSetting)
+        if callback then callback(colorSetting) end
+    end)
+    return f
+end
+
+local function createTransparencySlider(parent, text, settingRef, callback)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 50)
+    f.BackgroundColor3 = Color3.fromRGB(30,30,30)
+    f.BackgroundTransparency = 0.3
+    f.Parent = parent
+    Instance.new("UICorner").CornerRadius = UDim.new(0, 4); Instance.new("UICorner").Parent = f
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -20, 0, 20)
+    lbl.Position = UDim2.new(0, 10, 0, 5)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text .. ": " .. string.format("%.2f", settingRef)
+    lbl.TextColor3 = Color3.fromRGB(200,200,200)
+    lbl.TextSize = 12
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = f
+
+    local bg = Instance.new("Frame")
+    bg.Size = UDim2.new(1, -40, 0, 10)
+    bg.Position = UDim2.new(0, 20, 0, 30)
+    bg.BackgroundColor3 = Color3.fromRGB(50,50,50)
+    bg.BorderSizePixel = 0
+    bg.Parent = f
+    Instance.new("UICorner").CornerRadius = UDim.new(1, 0); Instance.new("UICorner").Parent = bg
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(settingRef, 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    fill.BorderSizePixel = 0
+    fill.Parent = bg
+    Instance.new("UICorner").CornerRadius = UDim.new(1, 0); Instance.new("UICorner").Parent = fill
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 16, 0, 16)
+    btn.Position = UDim2.new(settingRef, -8, 0.5, -8)
+    btn.BackgroundColor3 = Color3.fromRGB(255,255,255)
+    btn.Text = ""
+    btn.Parent = bg
+    Instance.new("UICorner").CornerRadius = UDim.new(1, 0); Instance.new("UICorner").Parent = btn
+
+    local dragging = false
+    btn.MouseButton1Down:Connect(function() dragging = true end)
+    UserInputService.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
+            local mousePos = UserInputService:GetMouseLocation()
+            local pos = bg.AbsolutePosition
+            local size = bg.AbsoluteSize.X
+            local rel = math.clamp((mousePos.X - pos.X) / size, 0, 1)
+            if math.abs(rel - settingRef) > 0.005 then
+                settingRef = rel
+                fill.Size = UDim2.new(settingRef, 0, 1, 0)
+                btn.Position = UDim2.new(settingRef, -8, 0.5, -8)
+                lbl.Text = text .. ": " .. string.format("%.2f", settingRef)
+                if callback then callback(settingRef) end
+            end
+        end
+    end)
+    return f
+end
+
+createSection("ТАРГЕТЫ (КРАСНАЯ ПОДСВЕТКА)")
+createToggle(customScrolling, "Обводка таргета", Settings.TargetUseOutline, function(v)
+    Settings.TargetUseOutline = v
+    updateAllHighlights(); saveSettings()
+end)
+createToggle(customScrolling, "Заливка таргета", Settings.TargetUseFill, function(v)
+    Settings.TargetUseFill = v
+    updateAllHighlights(); saveSettings()
+end)
+createRGBInput(customScrolling, "Цвет обводки таргета", Settings.TargetOutlineColor, function()
+    updateAllHighlights(); saveSettings()
+end)
+createRGBInput(customScrolling, "Цвет заливки таргета", Settings.TargetFillColor, function()
+    updateAllHighlights(); saveSettings()
+end)
+createTransparencySlider(customScrolling, "Прозр. обводки таргета", Settings.TargetOutlineTransparency, function(v)
+    Settings.TargetOutlineTransparency = v
+    updateAllHighlights(); saveSettings()
+end)
+createTransparencySlider(customScrolling, "Прозр. заливки таргета", Settings.TargetFillTransparency, function(v)
+    Settings.TargetFillTransparency = v
+    updateAllHighlights(); saveSettings()
+end)
+
+createSection("ВАЙТЛИСТ (СИНЯЯ ПОДСВЕТКА)")
+createToggle(customScrolling, "Обводка вайтлиста", Settings.WhitelistUseOutline, function(v)
+    Settings.WhitelistUseOutline = v
+    updateAllHighlights(); saveSettings()
+end)
+createToggle(customScrolling, "Заливка вайтлиста", Settings.WhitelistUseFill, function(v)
+    Settings.WhitelistUseFill = v
+    updateAllHighlights(); saveSettings()
+end)
+createRGBInput(customScrolling, "Цвет обводки вайтлиста", Settings.WhitelistOutlineColor, function()
+    updateAllHighlights(); saveSettings()
+end)
+createRGBInput(customScrolling, "Цвет заливки вайтлиста", Settings.WhitelistFillColor, function()
+    updateAllHighlights(); saveSettings()
+end)
+createTransparencySlider(customScrolling, "Прозр. обводки вайтлиста", Settings.WhitelistOutlineTransparency, function(v)
+    Settings.WhitelistOutlineTransparency = v
+    updateAllHighlights(); saveSettings()
+end)
+createTransparencySlider(customScrolling, "Прозр. заливки вайтлиста", Settings.WhitelistFillTransparency, function(v)
+    Settings.WhitelistFillTransparency = v
+    updateAllHighlights(); saveSettings()
+end)
+
+createSection("ТОЧКИ ПРИЦЕЛА (ТАРГЕТЫ)")
+createRGBInput(customScrolling, "Цвет точки таргета", Settings.HighlightColor, function()
+    updateAllDotColors(); saveSettings()
+end)
+createRGBInput(customScrolling, "Цвет точки текущей цели", Settings.CurrentTargetColor, function()
+    updateAllDotColors(); saveSettings()
+end)
+
+settingsBtn.MouseButton1Click:Connect(function()
+    customMenuVisible = not customMenuVisible
+    customFrame.Visible = customMenuVisible
+end)
+
+-- ========== PLAYER LIST ==========
+local function refreshPlayerList()
+    for _, child in pairs(scrollingFrame:GetChildren()) do
+        if child:IsA("ImageButton") then child:Destroy() end
+    end
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+
+        local isTarget = isInList(selectedPlayers, player)
+        local isWL = isInList(whitelistPlayers, player)
+
+        local btn = Instance.new("ImageButton")
+        btn.Name = "Player_" .. player.Name
+        btn.Size = UDim2.new(0, 80, 0, 90)
+        if isWL then
+            btn.BackgroundColor3 = Color3.fromRGB(0, 90, 160)
+        elseif isTarget then
+            btn.BackgroundColor3 = Color3.fromRGB(160, 0, 0)
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+        end
+        btn.BackgroundTransparency = 0.2
+        btn.BorderSizePixel = 0
+        btn.ClipsDescendants = true
+        btn.Active = true
+        btn.AutoButtonColor = false
+        btn.Parent = scrollingFrame
+        btn.Image = getAvatarUrl(player.UserId)
+        Instance.new("UICorner").CornerRadius = UDim.new(0, 8); Instance.new("UICorner").Parent = btn
+
+        local nameLabel = Instance.new("TextLabel")
+        nameLabel.Name = "Name"
+        nameLabel.Size = UDim2.new(1, 0, 0, 18)
+        nameLabel.Position = UDim2.new(0, 0, 1, -18)
+        nameLabel.BackgroundColor3 = Color3.fromRGB(0,0,0)
+        nameLabel.BackgroundTransparency = 0.4
+        nameLabel.Text = player.DisplayName or player.Name
+        nameLabel.TextColor3 = Color3.fromRGB(255,255,255)
+        nameLabel.TextSize = 10
+        nameLabel.Font = Enum.Font.GothamBold
+        nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+        nameLabel.Active = false
+        nameLabel.Parent = btn
+
+        if isTarget or isWL then
+            local ind = Instance.new("Frame")
+            ind.Name = "Indicator"
+            ind.Size = UDim2.new(0, 8, 0, 8)
+            ind.Position = UDim2.new(1, -12, 0, 4)
+            ind.BackgroundColor3 = isWL and Color3.fromRGB(40,120,255) or Color3.fromRGB(255,40,40)
+            ind.BorderSizePixel = 0
+            ind.Active = false
+            ind.Parent = btn
+            Instance.new("UICorner").CornerRadius = UDim.new(1, 0); Instance.new("UICorner").Parent = ind
+        end
+
+        btn.MouseEnter:Connect(function()
+            hoveredListPlayer = player
+        end)
+        btn.MouseLeave:Connect(function()
+            if hoveredListPlayer == player then hoveredListPlayer = nil end
+        end)
+
+        local function onPlayerButtonClick()
+            if isInList(selectedPlayers, player) then
+                removeFromList(selectedPlayers, player)
+                removeAimDot(player)
+                if not isInList(whitelistPlayers, player) then
+                    removePlayerHighlight(player)
+                else
+                    applyHighlight(player, false)
+                end
+                if currentTarget == player then currentTarget = nil end
+            else
+                if isInList(whitelistPlayers, player) then
+                    removeFromList(whitelistPlayers, player)
+                    saveWhitelist()
+                end
+                table.insert(selectedPlayers, player)
+                createAimDot(player)
+                applyHighlight(player, true)
+            end
+            saveSelectedPlayers()
+            refreshPlayerList()
+        end
+
+        btn.MouseButton1Click:Connect(onPlayerButtonClick)
+        nameLabel.InputBegan:Connect(function(inp)
+            if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+                onPlayerButtonClick()
+            end
+        end)
+    end
+
+    task.wait()
+    scrollingFrame.CanvasSize = UDim2.new(0, 0, 0, gridLayout.AbsoluteContentSize.Y + 10)
+end
+
+-- ========== WHITELIST TOGGLE (H) ==========
+local function toggleWhitelist(player)
+    if not player then return end
+
+    if isInList(whitelistPlayers, player) then
+        removeFromList(whitelistPlayers, player)
+        removePlayerHighlight(player)
+        removeAimDot(player)
+        print("[WHITELIST] Убран:", player.Name)
+    else
+        if isInList(selectedPlayers, player) then
+            removeFromList(selectedPlayers, player)
+            removeAimDot(player)
+            saveSelectedPlayers()
+            if currentTarget == player then currentTarget = nil end
+        end
+        table.insert(whitelistPlayers, player)
+        applyHighlight(player, false)
+        print("[WHITELIST] Добавлен:", player.Name)
+    end
+
+    saveWhitelist()
+    refreshPlayerList()
+end
+
+-- ========== KEY HANDLERS ==========
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+
+    if input.KeyCode == Settings.MultiSelectKey then
+        isMultiSelectPressed = true
+    end
+
+    if input.KeyCode == Settings.AimLockKey then
+        aimLockEnabled = not aimLockEnabled
+        if aimLockEnabled then
+            currentTarget = getAimTarget()
+            if not currentTarget then
+                aimLockEnabled = false
+                print("[AIM] Нет доступных целей")
+            else
+                print("[AIM] Цель:", currentTarget.Name)
+            end
+        else
+            currentTarget = nil
+            print("[AIM] Отключено")
+        end
+    end
+
+    if input.KeyCode == Settings.MenuKey then
+        menuVisible = not menuVisible
+        frame.Visible = menuVisible
+    end
+
+    if input.KeyCode == Settings.WhitelistKey then
+        local player = getPlayerUnderCursor()
+        if not player and hoveredListPlayer then
+            player = hoveredListPlayer
+        end
+        if player then
+            toggleWhitelist(player)
+        else
+            print("[WHITELIST] Нет игрока под курсором")
+        end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gp)
+    if input.KeyCode == Settings.MultiSelectKey then
+        isMultiSelectPressed = false
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 and isMultiSelectPressed then
+        local player = getPlayerUnderCursor()
+        if not player then return end
+
+        if isInList(selectedPlayers, player) then
+            removeFromList(selectedPlayers, player)
+            removeAimDot(player)
+            if not isInList(whitelistPlayers, player) then
+                removePlayerHighlight(player)
+            else
+                applyHighlight(player, false)
+            end
+            if currentTarget == player then currentTarget = nil end
+        else
+            if isInList(whitelistPlayers, player) then
+                removeFromList(whitelistPlayers, player)
+                saveWhitelist()
+            end
+            table.insert(selectedPlayers, player)
+            createAimDot(player)
+            applyHighlight(player, true)
+        end
+        saveSelectedPlayers()
+        refreshPlayerList()
+    end
+end)
+
+-- ========== PLAYER EVENTS ==========
+local function hookCharacter(player)
+    if player == LocalPlayer then return end
+
+    local function onChar(char)
+        local hum = char:WaitForChild("Humanoid", 5)
+        if not hum then return end
+        task.wait(0.15)
+
+        if isInList(selectedPlayers, player) then
+            createAimDot(player)
+            applyHighlight(player, true)
+        elseif isInList(whitelistPlayers, player) then
+            applyHighlight(player, false)
+        end
+    end
+
+    player.CharacterAdded:Connect(onChar)
+    if player.Character then
+        task.spawn(onChar, player.Character)
+    end
+end
+
+for _, player in pairs(Players:GetPlayers()) do
+    hookCharacter(player)
+end
+
+Players.PlayerAdded:Connect(function(player)
+    task.wait(0.1)
+
+    for i, entry in pairs(selectedPlayers) do
+        if isPendingPlayer(entry) and entry.UserId == player.UserId then
+            selectedPlayers[i] = player
+            break
+        end
+    end
+
+    for i, entry in pairs(whitelistPlayers) do
+        if isPendingPlayer(entry) and entry.UserId == player.UserId then
+            whitelistPlayers[i] = player
+            break
+        end
+    end
+
+    hookCharacter(player)
+    refreshPlayerList()
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    for i, p in pairs(selectedPlayers) do
+        if p == player then
+            selectedPlayers[i] = { Name = player.Name, UserId = player.UserId, Pending = true }
+            break
+        end
+    end
+    for i, p in pairs(whitelistPlayers) do
+        if p == player then
+            whitelistPlayers[i] = { Name = player.Name, UserId = player.UserId, Pending = true }
+            break
+        end
+    end
+
+    removeAimDot(player)
+    removePlayerHighlight(player)
+
+    if currentTarget == player then currentTarget = nil end
+    saveSelectedPlayers()
+    saveWhitelist()
+    refreshPlayerList()
+end)
+
+-- ========== STATUS ==========
+local function updateStatus()
+    statusValue.Text = aimLockEnabled and "ON" or "OFF"
+    if aimLockEnabled and currentTarget then
+        targetLabel.Text = "Цель: " .. (currentTarget.DisplayName or currentTarget.Name)
+        targetLabel.TextColor3 = Color3.fromRGB(255,80,80)
+    else
+        targetLabel.Text = "Цель: None"
+        targetLabel.TextColor3 = Color3.fromRGB(150,150,150)
+    end
+
+    local tCount, wCount = 0, 0
+    for _, e in pairs(selectedPlayers) do
+        if not isPendingPlayer(e) then tCount = tCount + 1 end
+    end
+    for _, e in pairs(whitelistPlayers) do
+        if not isPendingPlayer(e) then wCount = wCount + 1 end
+    end
+    selectedLabel.Text = "Таргеты: " .. tCount .. " | WL: " .. wCount
+end
+
+-- ========== MAIN AIM LOOP через BindToRenderStep ==========
+local AIM_BIND_NAME = "AimLockCamera"
+
+local function aimStep()
+    -- Обновляем Drawing-точки
+    for _, entry in pairs(selectedPlayers) do
+        if not isPendingPlayer(entry) and aimDots[entry] then
+            updateAimDot(entry)
+        end
+    end
+
+    if aimLockEnabled then
+        -- Если текущая цель пропала/мертва/в WL — ищем нового (таргет или ближайший, кроме WL)
+        if not currentTarget
+            or not isPlayerAlive(currentTarget)
+            or isWhitelisted(currentTarget)
+            or not getTargetPart(currentTarget.Character) then
+            currentTarget = getAimTarget()
+        end
+
+        if currentTarget then
+            local part = getTargetPart(currentTarget.Character)
+            if part then
+                local targetCFrame = CFrame.new(Camera.CFrame.Position, part.Position)
+                if Settings.AimSensitivity >= 1 then
+                    Camera.CFrame = targetCFrame
+                else
+                    Camera.CFrame = Camera.CFrame:Lerp(targetCFrame, Settings.AimSensitivity)
+                end
+            end
+        end
+    end
+
+    updateStatus()
+end
+
+RunService:UnbindFromRenderStep(AIM_BIND_NAME)
+RunService:BindToRenderStep(AIM_BIND_NAME, Enum.RenderPriority.Camera.Value + 1, aimStep)
+
+-- ========== ДОП. ФУНКЦИИ ==========
+do
+    local moveToggle = true
+    UserInputService.InputBegan:Connect(function(input, gp)
+        if gp then return end
+        if input.KeyCode == Enum.KeyCode.Y then
+            moveToggle = not moveToggle
+            local scriptObj = LocalPlayer and LocalPlayer.PlayerScripts and LocalPlayer.PlayerScripts:FindFirstChild("CharacterAndBeamMove")
+            if scriptObj then
+                scriptObj.Enabled = moveToggle
+                print("CharacterAndBeamMove:", moveToggle and "ON" or "OFF")
+            end
+        end
+    end)
+end
+
+do
+    local deathToggle = false
+    local function killPlayer()
+        if LocalPlayer and LocalPlayer.Character then
+            local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.Health = 0 end
+        end
+    end
+    UserInputService.InputBegan:Connect(function(input, gp)
+        if gp then return end
+        if input.KeyCode == Enum.KeyCode.T then
+            deathToggle = not deathToggle
+            print("Respawn loop:", deathToggle and "ON" or "OFF")
+            task.spawn(function()
+                while deathToggle do
+                    killPlayer()
+                    task.wait(0.05)
+                end
+            end)
+        end
+    end)
+end
+
+pcall(function()
+    local chat = CoreGui:FindFirstChild("ExperienceChat")
+    if chat then
+        local app = chat:FindFirstChild("appLayout")
+        if app then
+            local input = app:FindFirstChild("chatInputBar")
+            if input then input.Visible = true end
+        end
+    end
+end)
+
+-- ========== INIT ==========
+Camera.FieldOfView = Settings.FieldOfView
+
+pcall(function()
+    loadSettings()
+    loadSelectedPlayers()
+    loadWhitelist()
+    resolvePendingList(selectedPlayers)
+    resolvePendingList(whitelistPlayers)
+    updateAllDotSizes()
+    updateAllDotColors()
+    updateAllHighlights()
+end)
+
+task.wait(1)
+refreshPlayerList()
+
+print("=== AIM LOCK v10 — таргеты ИЛИ все, кроме WL ===")
+print("Q - вкл/выкл аим")
+print("X - меню")
+print("C + ЛКМ по игроку - добавить/убрать таргет (красная подсветка)")
+print("Клик по игроку в списке меню - toggle таргета")
+print("H - вайтлист (синяя подсветка, исключается из лока)")
+print("⚙ в меню - настройки визуала")
+print("Y - тоггл CharacterAndBeamMove")
+print("T - цикл смерти (респавн)")
+print("FOV = 120")
+
+local oceanFolder = game.Workspace:FindFirstChild("Map")
+and game.Workspace.Map:FindFirstChild("AlwaysHereTweenedObjects")
+and game.Workspace.Map.AlwaysHereTweenedObjects:FindFirstChild("Ocean")
+if not oceanFolder then return end
+local Lighting = game:GetService("Lighting")
+local sky = Instance.new("Sky")
+sky.SkyboxBk = "rbxassetid://15542516997"
+sky.SkyboxDn = "rbxassetid://15542518076"
+sky.SkyboxFt = "rbxassetid://15542518821"
+sky.SkyboxLf = "rbxassetid://15542519595"
+sky.SkyboxRt = "rbxassetid://15542520652"
+sky.SkyboxUp = "rbxassetid://15542521515"
+sky.Parent = Lighting
+sky.Name = "Sky"
+-- Loop FieldOfView Changer
+_G.FOVChangerConnection = _G.FOVChangerConnection or nil
+if _G.FOVChangerConnection then
+_G.FOVChangerConnection:Disconnect()
+_G.FOVChangerConnection = nil
+end
+local camera = workspace.Camera
+_G.FOVChangerConnection = camera:GetPropertyChangedSignal("FieldOfView"):Connect(function()
+if camera.FieldOfView ~= 120 then
+camera.FieldOfView = 120
+end
+end)
+camera.FieldOfView = 120
+local function destroyOceans(parent)
+for _, child in pairs(parent:GetChildren()) do
+if child.Name == "Ocean" then
+child:Destroy()
+elseif #child:GetChildren() > 0 then
+destroyOceans(child)
+end
+end
+end
+local function applyNearBlackEffect(model)
+for _, part in ipairs(model:GetDescendants()) do
+if part:IsA("BasePart") then
+-- Изменено на почти черный цвет (очень темный серый, например, Color3.fromRGB(15, 15, 15))
+part.Color = Color3.fromRGB(15, 15, 15)
+part.Material = Enum.Material.Plastic -- Материал по умолчанию
+part.Reflectance = 0
+end
+end
+end
+-- Применяем эффект к уже существующим моделям с указанным именем
+for _, obj in ipairs(workspace:GetDescendants()) do
+if obj:IsA("Model") and obj.Name == "PalletLightBrown" then
+applyNearBlackEffect(obj)
+end
+end
+-- Применяем эффект к моделям, которые будут добавлены позже с указанным именем
+workspace.DescendantAdded:Connect(function(descendant)
+task.spawn(function()
+if descendant:IsA("Model") and descendant.Name == "PalletLightBrown" then
+task.wait(0.1) -- Необязательная задержка
+applyNearBlackEffect(descendant)
+end
+end)
+end)
+destroyOceans(oceanFolder)
+
+loadstring(game:HttpGet('https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source'))()
